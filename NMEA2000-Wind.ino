@@ -13,6 +13,7 @@
 */
 
 // Based on https://github.com/AK-Homberger/NMEA2000-Data-Sender Version 0.7, 28.01.2022, AK-Homberger
+// Based on theory of operation detailed in https://bikerglen.com/blog/building-a-synchro-to-digital-converter/
 
 #define ESP32_CAN_TX_PIN GPIO_NUM_5  // Set CAN TX port to 5 
 #define ESP32_CAN_RX_PIN GPIO_NUM_4  // Set CAN RX port to 4
@@ -25,10 +26,6 @@
 #include <N2kMessages.h>
 
 #define ENABLE_DEBUG_LOG 0 // Debug log
-
-#define ADC_Calibration_Value1 250.0 // For resistor measure 5 Volt and 180 Ohm equals 100% plus 1K resistor.
-#define ADC_Calibration_Value2 34.3  // The real value depends on the true resistor values for the ADC input (100K / 27 K).
-#define ADC_Calibration_Value3 34.3  // The real value depends on the true resistor values for the ADC input (100K / 27 K).
 
 int NodeAddress;  // To store last Node Address
 
@@ -43,36 +40,37 @@ const unsigned long TransmitMessages[] PROGMEM = {130306L, // Wind Data (Speed a
 // Wind speed data
 
 #define WindSpeed_Window 16 // Sliding average window size >= 1
-#define WindSpeed_Divisor 100000 // Divide pulses to compute speed in m/s
-#define WindSpeed_Pin 33  // Wind Speed is measured as interrupt on GPIO 33
+#define WindSpeed_Divisor 100 // Divide pulses to compute speed in m/s
+#define WindSpeedPin 33  // Wind Speed is measured as interrupt on GPIO 33
 
 volatile uint64_t StartValue = 0;                  // First interrupt value
-volatile uint64_t PeriodCount = 0;                // period in counts of 0.000001 of a second
-unsigned long Last_int_time = 0;
+volatile uint64_t PeriodCount = 0;                // period in counts of 0.001 of a second
+volatile unsigned long Last_int_time = 0;
 hw_timer_t * timer = NULL;                        // pointer to a variable of type hw_timer_t
-portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;  // synchs between maon cose and interrupt?
 
 
 // Wind angle data
 
-#define WindAngle_Window 16 // Sliding average window size >= 1
-int DirPhase = 0;                                  // Phase to read, 0-2
+#define WindAngle_Window 16                  // Sliding average window size >= 1
+
+volatile float Excite = 1.0;                     // Excitation signal, -1 or +1, 0 = undefined
+float S1_S3 = 0;                    // S1 - S3 (Yellow - Blue)
+float S3_S2 = 0;                    // S3 - S2 (Blue - Black) 
+float theta = 0;                    // Angle for computation
+float sinIn = 0;                    // Resolver format S1_S3
+float cosIn = 0;                    // Resolver format combined
+float delta = 0;                    // Error term
+float demod = 0;                    // Demodulated error term
+
+// Declare array of ADC pins that will be used for ADC Continuous mode - ONLY ADC1 pins are supported
+// Number of selected pins can be from 1 to ALL ADC1 pins.
+uint8_t ADCpins[] = {34, 35};  // S1_S3=34, S3_S2=35
+
+// Calculate how many pins are declared in the array - needed as input for the setup function of ADC Continuous
+uint8_t ADCpins_count = 2;
 
 // Direction Excitation is connected GPIO 14 (TMS)
-const int Excite_Pin = 14;
-
-// Direction Phase 0 is connected GPIO 34 (Analog ADC1_CH6)
-// Direction Phase 1 is connected GPIO 35 (Analog ADC1_CH7)
-// Direction Phase 2 is connected GPIO 39 (Analog ADC1_CH3)
-const int ADCpin[3] = {34,35,39};
-
-uint16_t DirPhaseVal[3]; // 0-3.3v = 0-4095
-const double Phase0Max = 4096;
-const double Phase0Min = 0;
-const double Phase1Max = 4096;
-const double Phase1Min = 0;
-const double Phase2Max = 4096;
-const double Phase2Min = 0;
+const int ExcitePin = 14;
 
 // Global Data
 
@@ -81,9 +79,6 @@ const double Phase2Min = 0;
 
 float WindSpeed = 0;  // m/s
 float WindAngle = 0;  // radians
-float Phase0 = 0;  // count
-float Phase1 = 0;  // count
-float Phase2 = 0;  // count
 
 // Serial port 2 config (GPIO 16)
 const int baudrate = 38400;
@@ -101,24 +96,23 @@ void debug_log(char* str) {
 //=======================================
 void IRAM_ATTR handleWindInterrupt()
 {
-  portENTER_CRITICAL_ISR(&mux);
-  uint64_t TempVal = timerRead(timer);        // value of timer at interrupt
-  PeriodCount = TempVal - StartValue;         // period count between rising edges in 0.000001 of a second
-  StartValue = TempVal;                       // puts latest reading as start for next calculation
-  portEXIT_CRITICAL_ISR(&mux);
   Last_int_time = millis();
+  PeriodCount = Last_int_time - StartValue;         // period count between rising edges in 0.001 of a second
+  StartValue = Last_int_time;                       // puts latest reading as start for next calculation
 }
 
+// Excitation Event Interrupt
+// Enters on both rising and falling edge
+//=======================================
 void IRAM_ATTR handleExciteInterrupt()
 {
-  portENTER_CRITICAL_ISR(&mux);
-  DirPhaseVal[DirPhase] = ReadVoltage(ADCpin[DirPhase]);
-  DirPhase = DirPhase + 1;
-  if (DirPhase == 3) {
-    DirPhase = 0;
+  if (digitalRead(ExcitePin) == LOW) {
+    Excite = -1.0;
+  } else {
+    Excite = 1.0;
   }
-  portEXIT_CRITICAL_ISR(&mux);
 }
+
 
 
 void setup() {
@@ -132,17 +126,16 @@ void setup() {
 
   // Init WindSpeed measure
   
-  pinMode(WindSpeed_Pin, INPUT_PULLUP);                                            // sets pin high
-  attachInterrupt(digitalPinToInterrupt(WindSpeed_Pin), handleWindInterrupt, FALLING); // attaches pin to interrupt on Falling Edge
-  timer = timerBegin(1000000);                                                // this returns a pointer to the hw_timer_t global variable
-  timerStart(timer);                                                              // starts the timer
+  pinMode(WindSpeedPin, INPUT_PULLUP);                                                // sets pin high
+  attachInterrupt(digitalPinToInterrupt(WindSpeedPin), handleWindInterrupt, FALLING); // attaches pin to interrupt on Falling Edge
 
-  // Init Excitation Voltage Peak Detection
+  // Init Excitation Voltage Sign Detection
   
-  pinMode(Excite_Pin, INPUT_PULLUP);                                            // sets pin high
-  attachInterrupt(digitalPinToInterrupt(Excite_Pin), handleExciteInterrupt, RISING); // attaches pin to interrupt on Rising Edge
+  pinMode(ExcitePin, INPUT_PULLUP);                                            // sets pin high
+  attachInterrupt(digitalPinToInterrupt(ExcitePin), handleExciteInterrupt, CHANGE); // attaches pin to interrupt on rising and falling edge
 
-  // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
+ 
+ // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
 
   NMEA2000.SetN2kCANMsgBufSize(8);
   NMEA2000.SetN2kCANReceiveFrameBufSize(250);
@@ -190,35 +183,20 @@ void setup() {
 double ReadWindSpeed() {
   double WindSpeed = 0;
 
-  portENTER_CRITICAL(&mux);
-  if (PeriodCount != 0) {                            // 0 means no signals measured
-    WindSpeed = 1000000.00 / PeriodCount;            // PeriodCount in 0.000001 of a second  
+  if (PeriodCount != 0) {                         // 0 means no signals measured
+    WindSpeed = 1000.00 / (PeriodCount * WindSpeed_Divisor);            // PeriodCount in 0.001 of a second  
   }  
-  portEXIT_CRITICAL(&mux);
-  WindSpeed = WindSpeed / WindSpeed_Divisor;
-  if (millis() > Last_int_time + 2000) WindSpeed = 0;       // No signals WindSpeed=0;
+  if (millis() > Last_int_time + 500) WindSpeed = 0;       // No signals WindSpeed=0;
   return (WindSpeed);
 }
 
-// Compute Wind Angle from relative phase voltages
+// Compute Wind Angle from theta
 
 double ComputeWindAngle() {
   double WindAngle = 0;
 
-  portENTER_CRITICAL(&mux);
-  Phase0 = DirPhaseVal[0] - ((Phase0Max - Phase0Min) / 2);
-  Phase1 = DirPhaseVal[1] - ((Phase1Max - Phase1Min) / 2);
-  Phase2 = DirPhaseVal[2] - ((Phase2Max - Phase2Min) / 2);
-//  DirPhaseVal[0] = 0;
-//  DirPhaseVal[1] = 0;
-//  DirPhaseVal[2] = 0;
-  portEXIT_CRITICAL(&mux);
-
-  double Phase0Angle = asin(Phase0/4096);
-  double Phase1Angle = asin(Phase1/4096) + (120.0/180.0*3.14159);
-  double Phase2Angle = asin(Phase2/4096) + (240.0/180.0*3.14159);
+  WindAngle = theta;
   
-  WindAngle = (Phase0Angle + Phase1Angle + Phase2Angle) / 3.0;
   return(WindAngle);
 }
 
@@ -245,10 +223,14 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
 
     Serial.printf("Wind Speed  :%4.1f m/s \n", WindSpeed);
     Serial.printf("Wind Angle  :%4.4f radians \n", WindAngle);
-    Serial.printf("DirPhase  :%1i \n", DirPhase);
-    Serial.printf("Phase0  :%4.0f \n", Phase0);
-    Serial.printf("Phase1  :%4.0f \n", Phase1);
-    Serial.printf("Phase2  :%4.0f \n", Phase2);
+    Serial.printf("S1_S3  :%4.4f \n", S1_S3);
+    Serial.printf("S3_S2  :%4.4f \n", S3_S2);
+    Serial.printf("sinIn  :%4.4f \n", sinIn);
+    Serial.printf("cosIn  :%4.4f \n", cosIn);
+    Serial.printf("theta  :%4.4f \n", theta);
+    Serial.printf("delta  :%4.4f \n", delta);
+    Serial.printf("Excite  :%4.4f \n", Excite);
+    Serial.printf("demod  :%4.4f \n", demod);
 
     // SetN2kWindSpeed(tN2kMsg &N2kMsg, unsigned char SID, double WindSpeed, double WindAngle, tN2kWindReference WindReference)
     SetN2kWindSpeed(N2kMsg, 0, WindSpeed, WindAngle, N2kWind_Apparent);
@@ -257,20 +239,30 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
 }
 
 
-// ReadVoltage is used to improve the linearity of the ESP32 ADC see: https://github.com/G6EJD/ESP32-ADC-Accuracy-Improvement-function
-
-double ReadVoltage(byte pin) {
-  double reading = analogRead(pin); // Reference voltage is 3v3 so maximum reading is 3v3 = 4095 in range 0 to 4095
-  if (reading < 1 || reading > 4095) return 0;
-  // return -0.000000000009824 * pow(reading,3) + 0.000000016557283 * pow(reading,2) + 0.000854596860691 * reading + 0.065440348345433;
-  return (-0.000000000000016 * pow(reading, 4) + 0.000000000118171 * pow(reading, 3) - 0.000000301211691 * pow(reading, 2) + 0.001109019271794 * reading + 0.034143524634089) * 1000;
-} // Added an improved polynomial, use either, comment out as required
-
-
 
 void loop() {
-  unsigned int size;
-
+  // Run full speed to get ADC samples for angle computations
+  S1_S3 = (analogRead(ADCpins[0]) - 2048.0) / 4096.0;
+  S3_S2 = (analogRead(ADCpins[1]) - 2048.0) / 4096.0;
+    
+  // Scott transform the inputs
+  sinIn = S1_S3;
+  // cosIn = 2/sqrt(3) * (S3_S2 + 0.5 * S1_S3)
+  cosIn = 1.1574 * (S3_S2 + 0.5 * S1_S3);
+      
+  // Compute error using the identity described in chapter 3 of the Analog Devices handbook
+  delta = sinIn * cos(theta) - cosIn * sin(theta);
+    
+  // Demodulate AC error term
+  demod = Excite * delta;
+    
+  // Apply gain to demodulated error and integrate
+  // theta = theta + 1/64*demod
+  theta = theta + 0.015625 * demod;
+    
+  // Wrap from -pi to +pi
+  theta = fmod((theta + PI),(2 * PI)) - PI;
+  
   WindSpeed = ((WindSpeed * (WindSpeed_Window - 1)) + (ReadWindSpeed())) / WindSpeed_Window; // This implements a low pass filter to eliminate spikes
 
   WindAngle = ((WindAngle * (WindAngle_Window - 1)) + (ComputeWindAngle())) / WindAngle_Window; // This implements a low pass filter to eliminate spikes
