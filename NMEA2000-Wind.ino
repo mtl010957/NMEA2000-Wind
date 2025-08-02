@@ -61,6 +61,7 @@ float sinIn = 0;                    // Resolver format S1_S3
 float cosIn = 0;                    // Resolver format combined
 float delta = 0;                    // Error term
 float demod = 0;                    // Demodulated error term
+uint64_t samples = 0;                 // Count samples
 
 // Declare array of ADC pins that will be used for ADC Continuous mode - ONLY ADC1 pins are supported
 // Number of selected pins can be from 1 to ALL ADC1 pins.
@@ -231,6 +232,7 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
     Serial.printf("delta  :%4.4f \n", delta);
     Serial.printf("Excite  :%4.4f \n", Excite);
     Serial.printf("demod  :%4.4f \n", demod);
+    Serial.printf("samples  :%8i \n", samples);
 
     // SetN2kWindSpeed(tN2kMsg &N2kMsg, unsigned char SID, double WindSpeed, double WindAngle, tN2kWindReference WindReference)
     SetN2kWindSpeed(N2kMsg, 0, WindSpeed, WindAngle, N2kWind_Apparent);
@@ -242,6 +244,7 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
 
 void loop() {
   // Run full speed to get ADC samples for angle computations
+  samples = samples + 1;
   S1_S3 = (analogRead(ADCpins[0]) - 2048.0) / 4096.0;
   S3_S2 = (analogRead(ADCpins[1]) - 2048.0) / 4096.0;
     
