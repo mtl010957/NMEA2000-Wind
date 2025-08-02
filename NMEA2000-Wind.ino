@@ -53,7 +53,7 @@ hw_timer_t * timer = NULL;                        // pointer to a variable of ty
 
 #define WindAngle_Window 16                  // Sliding average window size >= 1
 
-volatile float Excite = 1.0;                     // Excitation signal, -1 or +1, 0 = undefined
+volatile float Excite = 0;                     // Excitation signal, -1 or +1, 0 = undefined
 float S1_S3 = 0;                    // S1 - S3 (Yellow - Blue)
 float S3_S2 = 0;                    // S3 - S2 (Blue - Black) 
 float theta = 0;                    // Angle for computation
@@ -62,6 +62,9 @@ float cosIn = 0;                    // Resolver format combined
 float delta = 0;                    // Error term
 float demod = 0;                    // Demodulated error term
 uint64_t samples = 0;                 // Count samples
+
+const int S1_S3_offset = 123; // ADC offset to correct for input at 0
+const int S3_S2_offset = 123; // ADC offset to correct for input at 0
 
 // Declare array of ADC pins that will be used for ADC Continuous mode - ONLY ADC1 pins are supported
 // Number of selected pins can be from 1 to ALL ADC1 pins.
@@ -102,19 +105,6 @@ void IRAM_ATTR handleWindInterrupt()
   StartValue = Last_int_time;                       // puts latest reading as start for next calculation
 }
 
-// Excitation Event Interrupt
-// Enters on both rising and falling edge
-//=======================================
-void IRAM_ATTR handleExciteInterrupt()
-{
-  if (digitalRead(ExcitePin) == LOW) {
-    Excite = -1.0;
-  } else {
-    Excite = 1.0;
-  }
-}
-
-
 
 void setup() {
 
@@ -133,7 +123,7 @@ void setup() {
   // Init Excitation Voltage Sign Detection
   
   pinMode(ExcitePin, INPUT_PULLUP);                                            // sets pin high
-  attachInterrupt(digitalPinToInterrupt(ExcitePin), handleExciteInterrupt, CHANGE); // attaches pin to interrupt on rising and falling edge
+  //attachInterrupt(digitalPinToInterrupt(ExcitePin), handleExciteInterrupt, CHANGE); // attaches pin to interrupt on rising and falling edge
 
  
  // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
@@ -233,6 +223,7 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
     Serial.printf("Excite  :%4.4f \n", Excite);
     Serial.printf("demod  :%4.4f \n", demod);
     Serial.printf("samples  :%8i \n", samples);
+    samples = 0; // Reset to get rough frequency
 
     // SetN2kWindSpeed(tN2kMsg &N2kMsg, unsigned char SID, double WindSpeed, double WindAngle, tN2kWindReference WindReference)
     SetN2kWindSpeed(N2kMsg, 0, WindSpeed, WindAngle, N2kWind_Apparent);
@@ -245,8 +236,8 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
 void loop() {
   // Run full speed to get ADC samples for angle computations
   samples = samples + 1;
-  S1_S3 = (analogRead(ADCpins[0]) - 2048.0) / 4096.0;
-  S3_S2 = (analogRead(ADCpins[1]) - 2048.0) / 4096.0;
+  S1_S3 = (analogRead(ADCpins[0]) + S1_S3_offset - 2048.0) / 4096.0;
+  S3_S2 = (analogRead(ADCpins[1]) + S3_S2_offset - 2048.0) / 4096.0;
     
   // Scott transform the inputs
   sinIn = S1_S3;
@@ -255,7 +246,14 @@ void loop() {
       
   // Compute error using the identity described in chapter 3 of the Analog Devices handbook
   delta = sinIn * cos(theta) - cosIn * sin(theta);
-    
+
+  // Read excitation voltage for sign
+  if (digitalRead(ExcitePin) == LOW) {
+    Excite = -1.0;
+  } else {
+    Excite = 1.0;
+  }
+ 
   // Demodulate AC error term
   demod = Excite * delta;
     
