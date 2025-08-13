@@ -158,7 +158,7 @@ void setup() {
   preferences.end();
   Serial.printf("NodeAddress=%d\n", NodeAddress);
 
-  NMEA2000.SetMode(tNMEA2000::N2km_ListenAndNode, NodeAddress);
+  NMEA2000.SetMode(tNMEA2000::N2km_NodeOnly, NodeAddress);
 
   NMEA2000.ExtendTransmitMessages(TransmitMessages);
 
