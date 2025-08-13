@@ -84,11 +84,6 @@ const int ExcitePin = 14;
 float WindSpeed = 0;  // m/s
 float WindAngle = 0;  // radians
 
-// Serial port 2 config (GPIO 16)
-const int baudrate = 38400;
-const int rs_config = SERIAL_8N1;
-
-
 void debug_log(char* str) {
 #if ENABLE_DEBUG_LOG == 1
   Serial.println(str);
