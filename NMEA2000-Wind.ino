@@ -220,7 +220,7 @@ void SendN2kWindData(double WindSpeed, double WindAngle) {
     samples = 0; // Reset to get rough frequency
 
     // SetN2kWindSpeed(tN2kMsg &N2kMsg, unsigned char SID, double WindSpeed, double WindAngle, tN2kWindReference WindReference)
-    SetN2kWindSpeed(N2kMsg, 0, WindSpeed, WindAngle, N2kWind_Apparent);
+    SetN2kWindSpeed(&N2kMsg, 0, WindSpeed, WindAngle, N2kWind_Apparent);
     NMEA2000.SendMsg(N2kMsg);
   }
 }
