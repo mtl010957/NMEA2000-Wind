@@ -118,7 +118,6 @@ void setup() {
   // Init Excitation Voltage Sign Detection
   
   pinMode(ExcitePin, INPUT_PULLUP);                                            // sets pin high
-  //attachInterrupt(digitalPinToInterrupt(ExcitePin), handleExciteInterrupt, CHANGE); // attaches pin to interrupt on rising and falling edge
 
  
  // Reserve enough buffer for sending all messages. This does not work on small memory devices like Uno or Mega
